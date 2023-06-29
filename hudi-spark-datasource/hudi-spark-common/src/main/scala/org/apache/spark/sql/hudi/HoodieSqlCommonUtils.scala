@@ -316,9 +316,8 @@ object HoodieSqlCommonUtils extends SparkAdapterSupport {
       normalizedKey -> value
     }
 
-    if (normalizedPartSpec.size < partColNames.size) {
-      throw new AnalysisException(
-        "All partition columns need to be specified for Hoodie's partition")
+    if (normalizedPartSpec.isEmpty) {
+      throw new AnalysisException("At least one partition column needs to be specified for Hoodie's partition")
     }
 
     val lowerPartColNames = partColNames.map(_.toLowerCase)
@@ -336,25 +335,38 @@ object HoodieSqlCommonUtils extends SparkAdapterSupport {
   def getPartitionPathToDrop(
                               hoodieCatalogTable: HoodieCatalogTable,
                               normalizedSpecs: Seq[Map[String, String]]): String = {
-    val table = hoodieCatalogTable.table
-    val allPartitionPaths = hoodieCatalogTable.getPartitionPaths
-    val enableHiveStylePartitioning = isHiveStyledPartitioning(allPartitionPaths, table)
-    val enableEncodeUrl = isUrlEncodeEnabled(allPartitionPaths, table)
-    val partitionsToDrop = normalizedSpecs.map { spec =>
-      hoodieCatalogTable.partitionFields.map { partitionColumn =>
-        val encodedPartitionValue = if (enableEncodeUrl) {
-          PartitionPathEncodeUtils.escapePathName(spec(partitionColumn))
-        } else {
-          spec(partitionColumn)
-        }
-        if (enableHiveStylePartitioning) {
-          partitionColumn + "=" + encodedPartitionValue
-        } else {
-          encodedPartitionValue
-        }
-      }.mkString("/")
-    }.mkString(",")
-    partitionsToDrop
+    val tableConfig = hoodieCatalogTable.tableConfig
+    val enableHiveStylePartitioning = tableConfig.getHiveStylePartitioningEnable.toBoolean
+    val enableEncodeUrl = tableConfig.getUrlEncodePartitioning.toBoolean
+    normalizedSpecs.foreach { spec =>
+      val specColSet = spec.keySet
+      val orderedSpecCols = hoodieCatalogTable.partitionFields
+        .takeWhile(partitionColumn => specColSet.contains(partitionColumn))
+      if (orderedSpecCols.length != specColSet.size) {
+        // TODO we need to think of a user-friendly description
+        throw new AnalysisException("Partition spec is invalid")
+      }
+    }
+    val prefixArray = normalizedSpecs.map { spec =>
+      val specColSet = spec.keySet
+      hoodieCatalogTable.partitionFields
+        .filter { partitionColumn => specColSet.contains(partitionColumn) }
+        .map { partitionColumn =>
+          val encodedPartitionValue = if (enableEncodeUrl) {
+            PartitionPathEncodeUtils.escapePathName(spec(partitionColumn))
+          } else {
+            spec(partitionColumn)
+          }
+          if (enableHiveStylePartitioning) {
+            partitionColumn + "=" + encodedPartitionValue
+          } else {
+            encodedPartitionValue
+          }
+        }.mkString("/")
+    }
+    hoodieCatalogTable.getPartitionPaths.filter(path => {
+      prefixArray.exists(prefix => path.startsWith(prefix))
+    }).mkString(",")
   }
 
   private def validateInstant(queryInstant: String): Unit = {

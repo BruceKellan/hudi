@@ -279,7 +279,10 @@ class TestAlterTableDropPartition extends HoodieSparkSqlTestBase {
         val tablePath = s"${tmp.getCanonicalPath}/$tableName"
 
         import spark.implicits._
-        val df = Seq((1, "z3", "v1", "2021", "10", "01"), (2, "l4", "v1", "2021", "10", "02"))
+        val df = Seq(
+          (1, "z3", "v1", "2021", "10", "01"),
+          (2, "l4", "v1", "2021", "10", "02"),
+          (3, "x5", "v1", "2022", "11", "03"))
           .toDF("id", "name", "ts", "year", "month", "day")
 
         df.write.format("hudi")
@@ -301,10 +304,26 @@ class TestAlterTableDropPartition extends HoodieSparkSqlTestBase {
              |location '$tablePath'
              |""".stripMargin)
 
-        // not specified all partition column
-        checkExceptionContain(s"alter table $tableName drop partition (year='2021', month='10')")(
-          "All partition columns need to be specified for Hoodie's partition"
+        checkExceptionContain(s"alter table $tableName drop partition (month='10')")(
+          "Partition spec is invalid"
         )
+
+        // supported specified part of all partition column
+        spark.sql(s"alter table $tableName drop partition (year='2021',month='10')")
+
+        // trigger clean so that partition deletion kicks in.
+        spark.sql(s"set ${HoodieCleanConfig.CLEANER_POLICY.key}=${HoodieCleaningPolicy.KEEP_LATEST_FILE_VERSIONS.name()}")
+        spark.sql(s"call run_clean(table => '$tableName', retain_commits => 1)")
+          .collect()
+
+        // show partitions
+        if (hiveStyle) {
+          checkAnswer(s"show partitions $tableName")(Seq("year=2022/month=11/day=03"))
+        } else {
+          checkAnswer(s"show partitions $tableName")(Seq("2022/11/03"))
+        }
+
+        spark.sql(s"alter table $tableName drop partition (year='2022')")
 
         df.write.format("hudi")
           .option(HoodieWriteConfig.TBL_NAME.key, tableName)
@@ -321,6 +340,8 @@ class TestAlterTableDropPartition extends HoodieSparkSqlTestBase {
 
         // drop 2021-10-01 partition
         spark.sql(s"alter table $tableName drop partition (year='2021', month='10', day='01')")
+        // drop 2022 partition
+        spark.sql(s"alter table $tableName drop partition (year='2022')")
 
         // trigger clean so that partition deletion kicks in.
         spark.sql(s"set ${HoodieCleanConfig.CLEANER_POLICY.key}=${HoodieCleaningPolicy.KEEP_LATEST_FILE_VERSIONS.name()}")
